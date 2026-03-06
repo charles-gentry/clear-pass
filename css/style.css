@@ -206,6 +206,11 @@ input[type="range"] {
   margin-left: 6px;
 }
 
+.pass-tz {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
 .pass-satellite {
   font-size: 0.75rem;
   color: var(--text-dim);

@@ -117,16 +117,18 @@
           day: 'numeric',
           timeZone: timezone,
         });
-        const timeStr = new Intl.DateTimeFormat(undefined, {
+        const timeParts = new Intl.DateTimeFormat(undefined, {
           hour: '2-digit',
           minute: '2-digit',
+          timeZoneName: 'short',
           timeZone: timezone,
-        })
-          .formatToParts(d)
+        }).formatToParts(d);
+        const timeStr = timeParts
           .filter((p) => p.type !== 'timeZoneName')
           .map((p) => p.value)
           .join('')
           .trim();
+        const tzLabel = timeParts.find((p) => p.type === 'timeZoneName')?.value ?? '';
         const cloudClass =
           p.cloudCover <= 10
             ? 'cloud-low'
@@ -139,7 +141,7 @@
           <div>
             <div class="pass-time">
               <span class="pass-date">${escapeHtml(dateStr)}</span>
-              <span class="pass-hour">${escapeHtml(timeStr)}</span>
+              <span class="pass-hour">${escapeHtml(timeStr)} <span class="pass-tz">${escapeHtml(tzLabel)}</span></span>
             </div>
             <div class="pass-satellite">${escapeHtml(p.satellite)}</div>
           </div>
