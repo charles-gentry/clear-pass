@@ -117,11 +117,16 @@
           day: 'numeric',
           timeZone: timezone,
         });
-        const timeStr = d.toLocaleTimeString(undefined, {
+        const timeStr = new Intl.DateTimeFormat(undefined, {
           hour: '2-digit',
           minute: '2-digit',
           timeZone: timezone,
-        });
+        })
+          .formatToParts(d)
+          .filter((p) => p.type !== 'timeZoneName')
+          .map((p) => p.value)
+          .join('')
+          .trim();
         const cloudClass =
           p.cloudCover <= 10
             ? 'cloud-low'
