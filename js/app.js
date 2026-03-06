@@ -120,7 +120,6 @@
         const timeStr = d.toLocaleTimeString(undefined, {
           hour: '2-digit',
           minute: '2-digit',
-          timeZoneName: 'short',
           timeZone: timezone,
         });
         const cloudClass =
