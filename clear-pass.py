@@ -102,14 +102,18 @@ def find_passes(lat, lon, days=10):
 
 def get_forecasts(lat, lon, days=10):
     """
-    Fetch hourly cloud cover forecast from Open-Meteo (no API key required).
-    Returns a list of (datetime, cloud_cover_percent) tuples in UTC.
+    Fetch hourly cloud cover forecast and daily sunrise/sunset from Open-Meteo
+    (no API key required).
+    Returns a tuple of:
+      - forecasts: list of (time_str, cloud_cover_percent) tuples in UTC
+      - sun_events: list of (sunrise_datetime, sunset_datetime) pairs in UTC
     """
     url = 'https://api.open-meteo.com/v1/forecast'
     params = {
         'latitude': lat,
         'longitude': lon,
         'hourly': 'cloud_cover',
+        'daily': 'sunrise,sunset',
         'forecast_days': min(days, 16),  # Open-Meteo free tier supports up to 16 days
         'timezone': 'UTC',
     }
@@ -123,7 +127,22 @@ def get_forecasts(lat, lon, days=10):
     if not times or not cloud_covers:
         logger.error("No forecast entries returned from Open-Meteo")
         raise RuntimeError('Forecast call returned no data')
-    return list(zip(times, cloud_covers))
+    daily = data.get('daily', {})
+    sunrises = daily.get('sunrise', [])
+    sunsets = daily.get('sunset', [])
+    sun_events = [
+        (datetime.fromisoformat(sunrises[i]), datetime.fromisoformat(sunsets[i]))
+        for i in range(len(sunrises))
+    ]
+    return list(zip(times, cloud_covers)), sun_events
+
+
+def is_daytime(pass_time, sun_events):
+    """Return True if pass_time falls between sunrise and sunset on any forecast day."""
+    for sunrise, sunset in sun_events:
+        if sunrise <= pass_time <= sunset:
+            return True
+    return False
 
 
 def select_cloud_cover(forecasts, timestamp):
@@ -143,17 +162,21 @@ def select_cloud_cover(forecasts, timestamp):
 
 def get_clear_passes(lat, lon, cloud_threshold=20, days=10):
     """
-    Return a list of all pass datetimes that have cloud cover <= threshold.
+    Return a list of all pass datetimes that have cloud cover <= threshold
+    and occur during daylight hours (between local sunrise and sunset).
     """
     passes = find_passes(lat, lon, days)
     if not passes:
         logger.warning('No passes found; verify coordinates or TLE feed')
         return []
 
-    forecasts = get_forecasts(lat, lon, days)
+    forecasts, sun_events = get_forecasts(lat, lon, days)
     clear_passes = []
 
     for p in passes:
+        if sun_events and not is_daytime(p, sun_events):
+            logger.info(f"Pass {p} UTC is outside daylight hours, skipping")
+            continue
         try:
             clouds = select_cloud_cover(forecasts, p)
         except Exception as e:

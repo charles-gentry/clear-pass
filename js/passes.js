@@ -157,15 +157,17 @@ const ClearPass = (() => {
   }
 
   /**
-   * Fetch hourly cloud cover forecast from Open-Meteo.
-   * Returns { forecasts, timezone } where timezone is the IANA timezone name
-   * for the pin's location (e.g. "America/New_York").
+   * Fetch hourly cloud cover forecast from Open-Meteo, plus daily
+   * sunrise/sunset times.
+   * Returns { forecasts, timezone, sunEvents } where sunEvents is an array of
+   * { sunrise, sunset } timestamps (ms since epoch, UTC) for each forecast day.
    */
   async function fetchForecasts(lat, lon, days) {
     const params = new URLSearchParams({
       latitude: lat,
       longitude: lon,
       hourly: 'cloud_cover',
+      daily: 'sunrise,sunset',
       forecast_days: Math.min(days, 16),
       timezone: 'auto',
     });
@@ -183,7 +185,22 @@ const ClearPass = (() => {
       time: new Date(new Date(t + 'Z').getTime() - utcOffsetMs),
       cover: covers[i],
     }));
-    return { forecasts, timezone: data.timezone ?? 'UTC' };
+    const sunriseTimes = data.daily?.sunrise ?? [];
+    const sunsetTimes = data.daily?.sunset ?? [];
+    const sunEvents = sunriseTimes.map((sr, i) => ({
+      sunrise: new Date(new Date(sr + 'Z').getTime() - utcOffsetMs).getTime(),
+      sunset: new Date(new Date(sunsetTimes[i] + 'Z').getTime() - utcOffsetMs).getTime(),
+    }));
+    return { forecasts, timezone: data.timezone ?? 'UTC', sunEvents };
+  }
+
+  /** Return true if passTime falls between sunrise and sunset on any forecast day. */
+  function isDaytime(passTime, sunEvents) {
+    const t = passTime.getTime();
+    for (const ev of sunEvents) {
+      if (t >= ev.sunrise && t <= ev.sunset) return true;
+    }
+    return false;
   }
 
   /** Find the nearest forecast entry to a given date and return cloud cover. */
@@ -231,7 +248,7 @@ const ClearPass = (() => {
     allPasses.sort((a, b) => a.time - b.time);
 
     onProgress?.('Fetching weather forecasts...');
-    const { forecasts, timezone } = await fetchForecasts(lat, lon, days);
+    const { forecasts, timezone, sunEvents } = await fetchForecasts(lat, lon, days);
 
     if (allPasses.length === 0) {
       return { passes: [], timezone };
@@ -240,6 +257,7 @@ const ClearPass = (() => {
     onProgress?.('Matching passes with cloud cover...');
     const results = [];
     for (const pass of allPasses) {
+      if (sunEvents.length > 0 && !isDaytime(pass.time, sunEvents)) continue;
       const cloud = nearestCloudCover(forecasts, pass.time);
       if (cloud !== null && cloud <= cloudThreshold) {
         results.push({

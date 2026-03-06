@@ -19,6 +19,7 @@ _spec.loader.exec_module(clear_pass)
 haversine = clear_pass.haversine
 select_cloud_cover = clear_pass.select_cloud_cover
 get_forecasts = clear_pass.get_forecasts
+is_daytime = clear_pass.is_daytime
 load_sentinel_satellites = clear_pass.load_sentinel_satellites
 find_passes = clear_pass.find_passes
 get_clear_passes = clear_pass.get_clear_passes
@@ -28,10 +29,16 @@ get_clear_passes = clear_pass.get_clear_passes
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _forecast_response(times, cloud_covers):
+def _forecast_response(times, cloud_covers, sunrises=None, sunsets=None):
+    n_days = len(sunrises) if sunrises is not None else 2
     mock_resp = MagicMock()
     mock_resp.json.return_value = {
-        "hourly": {"time": times, "cloud_cover": cloud_covers}
+        "hourly": {"time": times, "cloud_cover": cloud_covers},
+        "daily": {
+            "time": [f"2024-01-{i+1:02d}" for i in range(n_days)],
+            "sunrise": sunrises if sunrises is not None else ["2024-01-01T07:00"] * n_days,
+            "sunset": sunsets if sunsets is not None else ["2024-01-01T17:00"] * n_days,
+        },
     }
     return mock_resp
 
@@ -136,8 +143,22 @@ class TestGetForecasts:
         times = ["2024-01-01T00:00", "2024-01-01T01:00"]
         covers = [10, 50]
         mock_get.return_value = _forecast_response(times, covers)
-        result = get_forecasts(51.5, -0.1, days=1)
-        assert result == [("2024-01-01T00:00", 10), ("2024-01-01T01:00", 50)]
+        forecasts, sun_events = get_forecasts(51.5, -0.1, days=1)
+        assert forecasts == [("2024-01-01T00:00", 10), ("2024-01-01T01:00", 50)]
+
+    @patch("clear_pass.requests.get")
+    def test_returns_sun_events(self, mock_get):
+        mock_get.return_value = _forecast_response(
+            ["2024-01-01T00:00"], [10],
+            sunrises=["2024-01-01T07:30"],
+            sunsets=["2024-01-01T16:45"],
+        )
+        _, sun_events = get_forecasts(0, 0, days=1)
+        assert len(sun_events) == 1
+        assert sun_events[0] == (
+            datetime(2024, 1, 1, 7, 30),
+            datetime(2024, 1, 1, 16, 45),
+        )
 
     @patch("clear_pass.requests.get")
     def test_sends_correct_params(self, mock_get):
@@ -147,6 +168,7 @@ class TestGetForecasts:
         assert params["latitude"] == 48.8566
         assert params["longitude"] == 2.3522
         assert params["hourly"] == "cloud_cover"
+        assert params["daily"] == "sunrise,sunset"
         assert params["timezone"] == "UTC"
         assert params["forecast_days"] == 7
 
@@ -246,6 +268,42 @@ class TestLoadSentinelSatellites:
 
 
 # ---------------------------------------------------------------------------
+# is_daytime
+# ---------------------------------------------------------------------------
+
+class TestIsDaytime:
+    _SUNRISE = datetime(2024, 1, 1, 7, 0)
+    _SUNSET = datetime(2024, 1, 1, 17, 0)
+    _EVENTS = [(_SUNRISE, _SUNSET)]
+
+    def test_midday_is_daytime(self):
+        assert is_daytime(datetime(2024, 1, 1, 12, 0), self._EVENTS) is True
+
+    def test_exactly_at_sunrise_is_daytime(self):
+        assert is_daytime(self._SUNRISE, self._EVENTS) is True
+
+    def test_exactly_at_sunset_is_daytime(self):
+        assert is_daytime(self._SUNSET, self._EVENTS) is True
+
+    def test_before_sunrise_is_not_daytime(self):
+        assert is_daytime(datetime(2024, 1, 1, 3, 0), self._EVENTS) is False
+
+    def test_after_sunset_is_not_daytime(self):
+        assert is_daytime(datetime(2024, 1, 1, 22, 0), self._EVENTS) is False
+
+    def test_empty_sun_events_returns_false(self):
+        assert is_daytime(datetime(2024, 1, 1, 12, 0), []) is False
+
+    def test_matches_correct_day_in_multi_day_events(self):
+        events = [
+            (datetime(2024, 1, 1, 7, 0), datetime(2024, 1, 1, 17, 0)),
+            (datetime(2024, 1, 2, 7, 0), datetime(2024, 1, 2, 17, 0)),
+        ]
+        assert is_daytime(datetime(2024, 1, 2, 12, 0), events) is True
+        assert is_daytime(datetime(2024, 1, 2, 20, 0), events) is False
+
+
+# ---------------------------------------------------------------------------
 # get_clear_passes
 # ---------------------------------------------------------------------------
 
@@ -262,7 +320,7 @@ class TestGetClearPasses:
     def test_cloudy_pass_excluded(self, mock_passes, mock_forecasts):
         t = datetime(2024, 1, 1, 10, 0)
         mock_passes.return_value = [t]
-        mock_forecasts.return_value = [("2024-01-01T10:00", 90)]
+        mock_forecasts.return_value = ([("2024-01-01T10:00", 90)], [])
         assert get_clear_passes(51.5, -0.1, cloud_threshold=20) == []
 
     @patch("clear_pass.get_forecasts")
@@ -270,7 +328,7 @@ class TestGetClearPasses:
     def test_clear_pass_included(self, mock_passes, mock_forecasts):
         t = datetime(2024, 1, 1, 10, 0)
         mock_passes.return_value = [t]
-        mock_forecasts.return_value = [("2024-01-01T10:00", 5)]
+        mock_forecasts.return_value = ([("2024-01-01T10:00", 5)], [])
         assert get_clear_passes(51.5, -0.1, cloud_threshold=20) == [(t, 5)]
 
     @patch("clear_pass.get_forecasts")
@@ -278,7 +336,7 @@ class TestGetClearPasses:
     def test_pass_at_exact_threshold_included(self, mock_passes, mock_forecasts):
         t = datetime(2024, 1, 1, 10, 0)
         mock_passes.return_value = [t]
-        mock_forecasts.return_value = [("2024-01-01T10:00", 20)]
+        mock_forecasts.return_value = ([("2024-01-01T10:00", 20)], [])
         assert get_clear_passes(51.5, -0.1, cloud_threshold=20) == [(t, 20)]
 
     @patch("clear_pass.get_forecasts")
@@ -286,7 +344,7 @@ class TestGetClearPasses:
     def test_pass_one_above_threshold_excluded(self, mock_passes, mock_forecasts):
         t = datetime(2024, 1, 1, 10, 0)
         mock_passes.return_value = [t]
-        mock_forecasts.return_value = [("2024-01-01T10:00", 21)]
+        mock_forecasts.return_value = ([("2024-01-01T10:00", 21)], [])
         assert get_clear_passes(51.5, -0.1, cloud_threshold=20) == []
 
     @patch("clear_pass.get_forecasts")
@@ -296,11 +354,14 @@ class TestGetClearPasses:
         t2 = datetime(2024, 1, 1, 10, 0)
         t3 = datetime(2024, 1, 1, 14, 0)
         mock_passes.return_value = [t1, t2, t3]
-        mock_forecasts.return_value = [
-            ("2024-01-01T06:00", 5),   # clear
-            ("2024-01-01T10:00", 80),  # cloudy
-            ("2024-01-01T14:00", 15),  # clear
-        ]
+        mock_forecasts.return_value = (
+            [
+                ("2024-01-01T06:00", 5),   # clear
+                ("2024-01-01T10:00", 80),  # cloudy
+                ("2024-01-01T14:00", 15),  # clear
+            ],
+            [],
+        )
         result = get_clear_passes(51.5, -0.1, cloud_threshold=20)
         assert result == [(t1, 5), (t3, 15)]
 
@@ -316,7 +377,7 @@ class TestGetClearPasses:
     def test_days_forwarded_to_get_forecasts(self, mock_passes, mock_forecasts):
         t = datetime(2024, 1, 1, 10, 0)
         mock_passes.return_value = [t]
-        mock_forecasts.return_value = [("2024-01-01T10:00", 5)]
+        mock_forecasts.return_value = ([("2024-01-01T10:00", 5)], [])
         get_clear_passes(51.5, -0.1, cloud_threshold=20, days=7)
         mock_forecasts.assert_called_once_with(51.5, -0.1, 7)
 
@@ -326,6 +387,42 @@ class TestGetClearPasses:
         # If select_cloud_cover raises (e.g. None cover), the pass is skipped
         t = datetime(2024, 1, 1, 10, 0)
         mock_passes.return_value = [t]
-        mock_forecasts.return_value = [("2024-01-01T10:00", None)]
+        mock_forecasts.return_value = ([("2024-01-01T10:00", None)], [])
         # Should not raise; bad pass is silently skipped
+        assert get_clear_passes(51.5, -0.1, cloud_threshold=20) == []
+
+    @patch("clear_pass.get_forecasts")
+    @patch("clear_pass.find_passes")
+    def test_nighttime_pass_excluded(self, mock_passes, mock_forecasts):
+        # Pass at 02:00 UTC — before sunrise at 07:00
+        t = datetime(2024, 1, 1, 2, 0)
+        mock_passes.return_value = [t]
+        mock_forecasts.return_value = (
+            [("2024-01-01T02:00", 0)],
+            [(datetime(2024, 1, 1, 7, 0), datetime(2024, 1, 1, 17, 0))],
+        )
+        assert get_clear_passes(51.5, -0.1, cloud_threshold=20) == []
+
+    @patch("clear_pass.get_forecasts")
+    @patch("clear_pass.find_passes")
+    def test_daytime_pass_included_with_sun_events(self, mock_passes, mock_forecasts):
+        # Pass at 10:00 UTC — between sunrise 07:00 and sunset 17:00
+        t = datetime(2024, 1, 1, 10, 0)
+        mock_passes.return_value = [t]
+        mock_forecasts.return_value = (
+            [("2024-01-01T10:00", 5)],
+            [(datetime(2024, 1, 1, 7, 0), datetime(2024, 1, 1, 17, 0))],
+        )
+        assert get_clear_passes(51.5, -0.1, cloud_threshold=20) == [(t, 5)]
+
+    @patch("clear_pass.get_forecasts")
+    @patch("clear_pass.find_passes")
+    def test_post_sunset_pass_excluded(self, mock_passes, mock_forecasts):
+        # Pass at 20:00 UTC — after sunset at 17:00
+        t = datetime(2024, 1, 1, 20, 0)
+        mock_passes.return_value = [t]
+        mock_forecasts.return_value = (
+            [("2024-01-01T20:00", 0)],
+            [(datetime(2024, 1, 1, 7, 0), datetime(2024, 1, 1, 17, 0))],
+        )
         assert get_clear_passes(51.5, -0.1, cloud_threshold=20) == []
