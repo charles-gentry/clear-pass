@@ -187,6 +187,7 @@ input[type="range"] {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   transition: border-color 0.15s;
+  cursor: pointer;
 }
 
 .pass-card:hover {
