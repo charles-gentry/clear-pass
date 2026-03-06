@@ -206,12 +206,6 @@ input[type="range"] {
   margin-left: 6px;
 }
 
-.pass-utc {
-  font-size: 0.75rem;
-  color: var(--text-dim);
-  margin-top: 1px;
-}
-
 .pass-satellite {
   font-size: 0.75rem;
   color: var(--text-dim);
