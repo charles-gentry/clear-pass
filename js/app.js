@@ -7,12 +7,6 @@
   let selectedLat = null;
   let selectedLon = null;
   let marker = null;
-  let lastHoveredPassIdx = null;
-
-  // ── Swath layer IDs ──
-  const SWATH_SOURCE = 'swath-source';
-  const SWATH_FILL = 'swath-fill';
-  const SWATH_LINE = 'swath-line';
 
   // ── DOM refs ──
   const coordsDisplay = document.getElementById('coords-display');
@@ -56,9 +50,8 @@
     hintEl.classList.add('hidden');
     predictBtn.disabled = false;
 
-    // Clear previous results and swaths
+    // Clear previous results
     resultsContent.innerHTML = '';
-    clearSwaths();
   });
 
   // ── Slider controls ──
@@ -95,8 +88,6 @@
 
       loadingEl.classList.add('hidden');
       renderResults(passes, threshold, days, timezone);
-      renderSwaths(passes);
-      attachPassHoverHandlers(passes);
     } catch (err) {
       loadingEl.classList.add('hidden');
       resultsContent.innerHTML = `<div class="error-msg">Error: ${escapeHtml(err.message)}</div>`;
@@ -104,69 +95,6 @@
       predictBtn.disabled = false;
     }
   });
-
-  // ── Swath map layers ──
-  function clearSwaths() {
-    if (map.getLayer(SWATH_LINE)) map.removeLayer(SWATH_LINE);
-    if (map.getLayer(SWATH_FILL)) map.removeLayer(SWATH_FILL);
-    if (map.getSource(SWATH_SOURCE)) map.removeSource(SWATH_SOURCE);
-    lastHoveredPassIdx = null;
-  }
-
-  function renderSwaths(passes) {
-    clearSwaths();
-    const features = passes
-      .map((p, i) => (p.swath ? { ...p.swath, properties: { index: i } } : null))
-      .filter(Boolean);
-    if (features.length === 0) return;
-
-    map.addSource(SWATH_SOURCE, {
-      type: 'geojson',
-      data: { type: 'FeatureCollection', features },
-      promoteId: 'index',
-    });
-
-    map.addLayer({
-      id: SWATH_FILL,
-      type: 'fill',
-      source: SWATH_SOURCE,
-      paint: {
-        'fill-color': '#4f8cff',
-        'fill-opacity': [
-          'case', ['boolean', ['feature-state', 'hovered'], false], 0.30, 0.10,
-        ],
-      },
-    });
-
-    map.addLayer({
-      id: SWATH_LINE,
-      type: 'line',
-      source: SWATH_SOURCE,
-      paint: {
-        'line-color': '#4f8cff',
-        'line-width': ['case', ['boolean', ['feature-state', 'hovered'], false], 2, 1],
-        'line-opacity': ['case', ['boolean', ['feature-state', 'hovered'], false], 1.0, 0.35],
-      },
-    });
-  }
-
-  function highlightSwath(index) {
-    if (!map.getSource(SWATH_SOURCE)) return;
-    if (lastHoveredPassIdx !== null) {
-      map.setFeatureState({ source: SWATH_SOURCE, id: lastHoveredPassIdx }, { hovered: false });
-    }
-    if (index !== null) {
-      map.setFeatureState({ source: SWATH_SOURCE, id: index }, { hovered: true });
-    }
-    lastHoveredPassIdx = index;
-  }
-
-  function attachPassHoverHandlers() {
-    resultsContent.querySelectorAll('.pass-card').forEach((card, i) => {
-      card.addEventListener('mouseenter', () => highlightSwath(i));
-      card.addEventListener('mouseleave', () => highlightSwath(null));
-    });
-  }
 
   // ── Render results ──
   function renderResults(passes, threshold, days, timezone) {
