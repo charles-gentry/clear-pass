@@ -26,6 +26,87 @@ const ClearPass = (() => {
     return 2 * EARTH_RADIUS_KM * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
+  /** Great-circle bearing (degrees, 0=N, 90=E) from point 1 to point 2. */
+  function trackBearing(lat1, lon1, lat2, lon2) {
+    const φ1 = lat1 * DEG2RAD, φ2 = lat2 * DEG2RAD;
+    const Δλ = (lon2 - lon1) * DEG2RAD;
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    return Math.atan2(y, x) / DEG2RAD;
+  }
+
+  /**
+   * Point [lon, lat] at distKm from (lat, lon) along bearingDeg.
+   * Returns GeoJSON-order [lon, lat] in degrees.
+   */
+  function destinationPoint(lat, lon, bearingDeg, distKm) {
+    const d = distKm / EARTH_RADIUS_KM;
+    const φ1 = lat * DEG2RAD;
+    const λ1 = lon * DEG2RAD;
+    const θ = bearingDeg * DEG2RAD;
+    const φ2 = Math.asin(
+      Math.sin(φ1) * Math.cos(d) + Math.cos(φ1) * Math.sin(d) * Math.cos(θ)
+    );
+    const λ2 =
+      λ1 +
+      Math.atan2(
+        Math.sin(θ) * Math.sin(d) * Math.cos(φ1),
+        Math.cos(d) - Math.sin(φ1) * Math.sin(φ2)
+      );
+    return [λ2 / DEG2RAD, φ2 / DEG2RAD];
+  }
+
+  /**
+   * Sample the ground track ±halfDurSec seconds around a culmination.
+   * Longitudes are unwrapped so the track is continuous across the anti-meridian.
+   * Returns [{lat, lon}].
+   */
+  function computeGroundTrack(satrec, culminationDate, halfDurSec = 480, stepSec = 30) {
+    const t0 = culminationDate.getTime();
+    const points = [];
+    for (let dt = -halfDurSec * 1000; dt <= halfDurSec * 1000; dt += stepSec * 1000) {
+      const sp = subpoint(satrec, new Date(t0 + dt));
+      if (sp) points.push(sp);
+    }
+    // Unwrap longitudes to prevent ±180° jumps
+    for (let i = 1; i < points.length; i++) {
+      let lon = points[i].lon;
+      const prev = points[i - 1].lon;
+      while (lon - prev > 180) lon -= 360;
+      while (prev - lon > 180) lon += 360;
+      points[i] = { lat: points[i].lat, lon };
+    }
+    return points;
+  }
+
+  /**
+   * Build a GeoJSON Polygon Feature for the 290 km-wide satellite swath.
+   * The polygon is constructed by offsetting each ground-track point 145 km
+   * perpendicularly left and right of the direction of travel.
+   */
+  function swathPolygon(groundTrack) {
+    if (groundTrack.length < 2) return null;
+    const leftEdge = [];
+    const rightEdge = [];
+    for (let i = 0; i < groundTrack.length; i++) {
+      const p = groundTrack[i];
+      // Forward bearing at each point; use backward diff at the last point
+      const brg =
+        i < groundTrack.length - 1
+          ? trackBearing(p.lat, p.lon, groundTrack[i + 1].lat, groundTrack[i + 1].lon)
+          : trackBearing(groundTrack[i - 1].lat, groundTrack[i - 1].lon, p.lat, p.lon);
+      leftEdge.push(destinationPoint(p.lat, p.lon, brg - 90, SWATH_RADIUS_KM));
+      rightEdge.push(destinationPoint(p.lat, p.lon, brg + 90, SWATH_RADIUS_KM));
+    }
+    // Ring: left edge forward → right edge backward → close
+    const ring = [...leftEdge, ...[...rightEdge].reverse(), leftEdge[0]];
+    return {
+      type: 'Feature',
+      geometry: { type: 'Polygon', coordinates: [ring] },
+      properties: {},
+    };
+  }
+
   /** Fetch TLE data and return parsed satellite records for Sentinel-2A/B. */
   async function loadTLEs() {
     const resp = await fetch(TLE_URL);
@@ -136,11 +217,13 @@ const ClearPass = (() => {
         if (sp) {
           const dist = haversine(obsLat, obsLon, sp.lat, sp.lon);
           if (dist <= SWATH_RADIUS_KM) {
+            const groundTrack = computeGroundTrack(sat.satrec, culminationDate);
             passes.push({
               time: culminationDate,
               satellite: sat.name,
               elevation: bestElev,
               distKm: Math.round(dist),
+              swath: swathPolygon(groundTrack),
             });
           }
         }
