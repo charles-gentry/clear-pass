@@ -10,8 +10,7 @@ const ClearPass = (() => {
   const SWATH_RADIUS_KM = 145.0;
   const EARTH_RADIUS_KM = 6371.0;
   const DEG2RAD = Math.PI / 180;
-  const TLE_URL =
-    'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=TLE';
+  const TLE_URL = '/api/tle';
   const METEO_URL = 'https://api.open-meteo.com/v1/forecast';
 
   /** Great-circle distance in km between two lat/lon points. */
