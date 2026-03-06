@@ -1,0 +1,246 @@
+/**
+ * passes.js — Sentinel-2 clear-sky overpass prediction
+ *
+ * Uses satellite.js for SGP4 orbital propagation and Open-Meteo for weather.
+ * All computation runs client-side.
+ */
+
+const ClearPass = (() => {
+  const SAT_NAMES = ['SENTINEL-2A', 'SENTINEL-2B'];
+  const SWATH_RADIUS_KM = 145.0;
+  const EARTH_RADIUS_KM = 6371.0;
+  const DEG2RAD = Math.PI / 180;
+  const TLE_URL =
+    'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=TLE';
+  const METEO_URL = 'https://api.open-meteo.com/v1/forecast';
+
+  /** Great-circle distance in km between two lat/lon points. */
+  function haversine(lat1, lon1, lat2, lon2) {
+    const phi1 = lat1 * DEG2RAD;
+    const phi2 = lat2 * DEG2RAD;
+    const dphi = (lat2 - lat1) * DEG2RAD;
+    const dlam = (lon2 - lon1) * DEG2RAD;
+    const a =
+      Math.sin(dphi / 2) ** 2 +
+      Math.cos(phi1) * Math.cos(phi2) * Math.sin(dlam / 2) ** 2;
+    return 2 * EARTH_RADIUS_KM * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  /** Fetch TLE data and return parsed satellite records for Sentinel-2A/B. */
+  async function loadTLEs() {
+    const resp = await fetch(TLE_URL);
+    if (!resp.ok) throw new Error(`TLE fetch failed: ${resp.status}`);
+    const text = await resp.text();
+    const lines = text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const sats = [];
+    for (let i = 0; i + 2 < lines.length; i += 3) {
+      const name = lines[i];
+      if (SAT_NAMES.includes(name)) {
+        const satrec = satellite.twoline2satrec(lines[i + 1], lines[i + 2]);
+        sats.push({ name, satrec });
+      }
+    }
+    if (sats.length === 0) {
+      throw new Error('No Sentinel-2 TLEs found in feed');
+    }
+    return sats;
+  }
+
+  /**
+   * Compute sub-satellite lat/lon at a given Date.
+   * Returns { lat, lon } in degrees.
+   */
+  function subpoint(satrec, date) {
+    const gmst = satellite.gstime(date);
+    const pv = satellite.propagate(satrec, date);
+    if (!pv.position) return null;
+    const geo = satellite.eciToGeodetic(pv.position, gmst);
+    return {
+      lat: satellite.degreesLat(geo.latitude),
+      lon: satellite.degreesLong(geo.longitude),
+    };
+  }
+
+  /**
+   * Check if the satellite is above the horizon from a ground location.
+   * Returns elevation angle in degrees, or null on error.
+   */
+  function elevation(satrec, date, obsLat, obsLon) {
+    const gmst = satellite.gstime(date);
+    const pv = satellite.propagate(satrec, date);
+    if (!pv.position) return null;
+    const observerGd = {
+      longitude: obsLon * DEG2RAD,
+      latitude: obsLat * DEG2RAD,
+      height: 0,
+    };
+    const posEcf = satellite.eciToEcf(pv.position, gmst);
+    const lookAngles = satellite.ecfToLookAngles(observerGd, posEcf);
+    return lookAngles.elevation / DEG2RAD;
+  }
+
+  /**
+   * Find passes for a single satellite over a time window.
+   * Scans in 30-second steps, detects when satellite rises above 0 deg,
+   * finds the culmination point, and checks if the sub-satellite point
+   * is within swath range.
+   */
+  function findSatPasses(sat, obsLat, obsLon, startDate, endDate) {
+    const passes = [];
+    const stepMs = 30 * 1000; // 30-second scan step
+    const fineStepMs = 5 * 1000; // 5-second fine step for culmination
+    let t = startDate.getTime();
+    const end = endDate.getTime();
+    let wasAbove = false;
+    let riseTime = null;
+    let maxElev = -Infinity;
+    let maxElevTime = null;
+
+    while (t <= end) {
+      const date = new Date(t);
+      const elev = elevation(sat.satrec, date, obsLat, obsLon);
+
+      if (elev !== null && elev > 0) {
+        if (!wasAbove) {
+          // satellite just rose
+          riseTime = t;
+          maxElev = elev;
+          maxElevTime = t;
+        }
+        if (elev > maxElev) {
+          maxElev = elev;
+          maxElevTime = t;
+        }
+        wasAbove = true;
+      } else if (wasAbove) {
+        // satellite just set — refine culmination with finer steps
+        let bestElev = maxElev;
+        let bestTime = maxElevTime;
+        const scanStart = Math.max(riseTime, maxElevTime - 60000);
+        const scanEnd = Math.min(t, maxElevTime + 60000);
+        for (let ft = scanStart; ft <= scanEnd; ft += fineStepMs) {
+          const fd = new Date(ft);
+          const fe = elevation(sat.satrec, fd, obsLat, obsLon);
+          if (fe !== null && fe > bestElev) {
+            bestElev = fe;
+            bestTime = ft;
+          }
+        }
+
+        // Check if sub-satellite point is within swath
+        const culminationDate = new Date(bestTime);
+        const sp = subpoint(sat.satrec, culminationDate);
+        if (sp) {
+          const dist = haversine(obsLat, obsLon, sp.lat, sp.lon);
+          if (dist <= SWATH_RADIUS_KM) {
+            passes.push({
+              time: culminationDate,
+              satellite: sat.name,
+              elevation: bestElev,
+              distKm: Math.round(dist),
+            });
+          }
+        }
+
+        wasAbove = false;
+        maxElev = -Infinity;
+        maxElevTime = null;
+        riseTime = null;
+      }
+
+      t += stepMs;
+    }
+    return passes;
+  }
+
+  /** Fetch hourly cloud cover forecast from Open-Meteo. */
+  async function fetchForecasts(lat, lon, days) {
+    const params = new URLSearchParams({
+      latitude: lat,
+      longitude: lon,
+      hourly: 'cloud_cover',
+      forecast_days: Math.min(days, 16),
+      timezone: 'UTC',
+    });
+    const resp = await fetch(`${METEO_URL}?${params}`);
+    if (!resp.ok) throw new Error(`Weather fetch failed: ${resp.status}`);
+    const data = await resp.json();
+    const times = data.hourly?.time ?? [];
+    const covers = data.hourly?.cloud_cover ?? [];
+    if (times.length === 0) throw new Error('No forecast data returned');
+    return times.map((t, i) => ({ time: new Date(t + 'Z'), cover: covers[i] }));
+  }
+
+  /** Find the nearest forecast entry to a given date and return cloud cover. */
+  function nearestCloudCover(forecasts, date) {
+    let best = null;
+    let bestDiff = Infinity;
+    for (const f of forecasts) {
+      const diff = Math.abs(f.time.getTime() - date.getTime());
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = f;
+      }
+    }
+    return best ? best.cover : null;
+  }
+
+  /**
+   * Main entry point: find all clear Sentinel-2 passes.
+   * @param {number} lat
+   * @param {number} lon
+   * @param {number} cloudThreshold — max cloud cover percent
+   * @param {number} days — forecast window
+   * @param {function} onProgress — optional progress callback
+   * @returns {Promise<Array>} array of { time, satellite, elevation, cloudCover }
+   */
+  async function getClearPasses(
+    lat,
+    lon,
+    cloudThreshold = 20,
+    days = 10,
+    onProgress
+  ) {
+    onProgress?.('Loading satellite TLE data...');
+    const sats = await loadTLEs();
+
+    const now = new Date();
+    const end = new Date(now.getTime() + days * 86400000);
+
+    onProgress?.('Computing orbital passes...');
+    let allPasses = [];
+    for (const sat of sats) {
+      const passes = findSatPasses(sat, lat, lon, now, end);
+      allPasses = allPasses.concat(passes);
+    }
+    allPasses.sort((a, b) => a.time - b.time);
+
+    if (allPasses.length === 0) {
+      return [];
+    }
+
+    onProgress?.('Fetching weather forecasts...');
+    const forecasts = await fetchForecasts(lat, lon, days);
+
+    onProgress?.('Matching passes with cloud cover...');
+    const results = [];
+    for (const pass of allPasses) {
+      const cloud = nearestCloudCover(forecasts, pass.time);
+      if (cloud !== null && cloud <= cloudThreshold) {
+        results.push({
+          time: pass.time,
+          satellite: pass.satellite,
+          elevation: pass.elevation,
+          cloudCover: cloud,
+          distKm: pass.distKm,
+        });
+      }
+    }
+    return results;
+  }
+
+  return { getClearPasses, haversine };
+})();
