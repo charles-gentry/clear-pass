@@ -156,14 +156,18 @@ const ClearPass = (() => {
     return passes;
   }
 
-  /** Fetch hourly cloud cover forecast from Open-Meteo. */
+  /**
+   * Fetch hourly cloud cover forecast from Open-Meteo.
+   * Returns { forecasts, timezone } where timezone is the IANA timezone name
+   * for the pin's location (e.g. "America/New_York").
+   */
   async function fetchForecasts(lat, lon, days) {
     const params = new URLSearchParams({
       latitude: lat,
       longitude: lon,
       hourly: 'cloud_cover',
       forecast_days: Math.min(days, 16),
-      timezone: 'UTC',
+      timezone: 'auto',
     });
     const resp = await fetch(`${METEO_URL}?${params}`);
     if (!resp.ok) throw new Error(`Weather fetch failed: ${resp.status}`);
@@ -171,7 +175,15 @@ const ClearPass = (() => {
     const times = data.hourly?.time ?? [];
     const covers = data.hourly?.cloud_cover ?? [];
     if (times.length === 0) throw new Error('No forecast data returned');
-    return times.map((t, i) => ({ time: new Date(t + 'Z'), cover: covers[i] }));
+    // utc_offset_seconds is the pin's UTC offset; used to convert local time
+    // strings (returned by Open-Meteo when timezone≠UTC) back to UTC Date objects
+    // so they can be matched against the UTC-based pass times.
+    const utcOffsetMs = (data.utc_offset_seconds ?? 0) * 1000;
+    const forecasts = times.map((t, i) => ({
+      time: new Date(new Date(t + 'Z').getTime() - utcOffsetMs),
+      cover: covers[i],
+    }));
+    return { forecasts, timezone: data.timezone ?? 'UTC' };
   }
 
   /** Find the nearest forecast entry to a given date and return cloud cover. */
@@ -218,12 +230,12 @@ const ClearPass = (() => {
     }
     allPasses.sort((a, b) => a.time - b.time);
 
-    if (allPasses.length === 0) {
-      return [];
-    }
-
     onProgress?.('Fetching weather forecasts...');
-    const forecasts = await fetchForecasts(lat, lon, days);
+    const { forecasts, timezone } = await fetchForecasts(lat, lon, days);
+
+    if (allPasses.length === 0) {
+      return { passes: [], timezone };
+    }
 
     onProgress?.('Matching passes with cloud cover...');
     const results = [];
@@ -239,7 +251,7 @@ const ClearPass = (() => {
         });
       }
     }
-    return results;
+    return { passes: results, timezone };
   }
 
   return { getClearPasses, haversine };
