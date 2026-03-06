@@ -3,17 +3,15 @@
 sentinel2_clear_pass.py
 
 Predict all clear Sentinel-2A/B overpasses for a given latitude/longitude,
-using TLE-based pass predictions and a single OpenWeatherMap 5-day/3-hour forecast API
-call (compatible with the free tier).
+using TLE-based pass predictions and the Open-Meteo free hourly forecast API
+(no API key required).
 
 Requires:
     pip install skyfield requests pytz
 
 Usage:
-    export OWM_API_KEY=your_openweathermap_api_key
     python sentinel2_clear_pass.py 51.5074 -0.1278 --threshold 20 --days 10
 """
-import os
 import math
 import logging
 import requests
@@ -102,58 +100,57 @@ def find_passes(lat, lon, days=10):
     return pass_times
 
 
-def get_forecasts(lat, lon, api_key):
+def get_forecasts(lat, lon, days=10):
     """
-    Fetch the 5-day/3-hour forecast once and return the list of entries.
+    Fetch hourly cloud cover forecast from Open-Meteo (no API key required).
+    Returns a list of (datetime, cloud_cover_percent) tuples in UTC.
     """
-    url = 'https://api.openweathermap.org/data/2.5/forecast'
-    params = {'lat': lat, 'lon': lon, 'appid': api_key, 'units': 'metric'}
-    logger.info(f"Fetching 5-day/3-hour forecasts: {url}")
+    url = 'https://api.open-meteo.com/v1/forecast'
+    params = {
+        'latitude': lat,
+        'longitude': lon,
+        'hourly': 'cloud_cover',
+        'forecast_days': min(days, 16),  # Open-Meteo free tier supports up to 16 days
+        'timezone': 'UTC',
+    }
+    logger.info(f"Fetching hourly cloud cover forecasts from Open-Meteo: {url}")
     resp = requests.get(url, params=params)
     resp.raise_for_status()
     data = resp.json()
-    entries = data.get('list', [])
-    if not entries:
-        logger.error("No forecast entries returned")
+    hourly = data.get('hourly', {})
+    times = hourly.get('time', [])
+    cloud_covers = hourly.get('cloud_cover', [])
+    if not times or not cloud_covers:
+        logger.error("No forecast entries returned from Open-Meteo")
         raise RuntimeError('Forecast call returned no data')
-    return entries
+    return list(zip(times, cloud_covers))
 
 
 def select_cloud_cover(forecasts, timestamp):
     """
     Select the cloud cover percentage from the forecast entry nearest `timestamp`.
-
-    Uses timezone-aware datetime.fromtimestamp to avoid deprecation warning.
+    forecasts is a list of (iso_time_string, cloud_cover_percent) tuples.
     """
-    best = min(
+    best_time, best_cover = min(
         forecasts,
-        key=lambda f: abs(
-            datetime.fromtimestamp(f['dt'], utc).replace(tzinfo=None) - timestamp
-        )
+        key=lambda f: abs(datetime.fromisoformat(f[0]) - timestamp)
     )
-    dt_fore = datetime.fromtimestamp(best['dt'], utc).replace(tzinfo=None)
-    clouds = best.get('clouds', {}).get('all')
-    if clouds is None:
-        logger.error("Missing clouds.all in forecast data at %s", dt_fore)
-        raise KeyError('Missing clouds.all in forecast data')
-    return clouds
+    if best_cover is None:
+        logger.error("Missing cloud cover value in forecast data at %s", best_time)
+        raise KeyError('Missing cloud cover in forecast data')
+    return best_cover
 
 
-def get_clear_passes(lat, lon, cloud_threshold=20, days=10, api_key=None):
+def get_clear_passes(lat, lon, cloud_threshold=20, days=10):
     """
     Return a list of all pass datetimes that have cloud cover <= threshold.
     """
-    if api_key is None:
-        api_key = os.getenv('OWM_API_KEY')
-    if not api_key:
-        raise ValueError('Set OWM_API_KEY environment variable')
-
     passes = find_passes(lat, lon, days)
     if not passes:
         logger.warning('No passes found; verify coordinates or TLE feed')
         return []
 
-    forecasts = get_forecasts(lat, lon, api_key)
+    forecasts = get_forecasts(lat, lon, days)
     clear_passes = []
 
     for p in passes:
@@ -177,14 +174,11 @@ if __name__ == '__main__':
                         help='Max cloud cover percent')
     parser.add_argument('-d', '--days', type=int, default=10,
                         help='Search window in days')
-    parser.add_argument('-k', '--api_key', type=str,
-                        help='OpenWeatherMap API key')
     args = parser.parse_args()
     try:
         clears = get_clear_passes(
             args.lat, args.lon,
-            args.threshold, args.days,
-            args.api_key
+            args.threshold, args.days
         )
         if clears:
             print("Cloud-free passes:")
