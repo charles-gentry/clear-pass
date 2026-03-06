@@ -116,16 +116,11 @@
           month: 'short',
           day: 'numeric',
         });
-        const localTimeStr = d.toLocaleTimeString(undefined, {
+        const timeStr = d.toLocaleTimeString(undefined, {
           hour: '2-digit',
           minute: '2-digit',
           timeZoneName: 'short',
         });
-        const utcTimeStr = d.toLocaleTimeString('en-GB', {
-          hour: '2-digit',
-          minute: '2-digit',
-          timeZone: 'UTC',
-        }) + ' GMT';
         const cloudClass =
           p.cloudCover <= 10
             ? 'cloud-low'
@@ -138,9 +133,8 @@
           <div>
             <div class="pass-time">
               <span class="pass-date">${escapeHtml(dateStr)}</span>
-              <span class="pass-hour">${escapeHtml(localTimeStr)}</span>
+              <span class="pass-hour">${escapeHtml(timeStr)}</span>
             </div>
-            <div class="pass-utc">${escapeHtml(utcTimeStr)}</div>
             <div class="pass-satellite">${escapeHtml(p.satellite)}</div>
           </div>
           <span class="cloud-badge ${cloudClass}">${p.cloudCover}%</span>
