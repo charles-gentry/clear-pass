@@ -75,7 +75,7 @@
     loadingEl.classList.remove('hidden');
 
     try {
-      const passes = await ClearPass.getClearPasses(
+      const { passes, timezone } = await ClearPass.getClearPasses(
         selectedLat,
         selectedLon,
         threshold,
@@ -87,7 +87,7 @@
       );
 
       loadingEl.classList.add('hidden');
-      renderResults(passes, threshold, days);
+      renderResults(passes, threshold, days, timezone);
     } catch (err) {
       loadingEl.classList.add('hidden');
       resultsContent.innerHTML = `<div class="error-msg">Error: ${escapeHtml(err.message)}</div>`;
@@ -97,7 +97,7 @@
   });
 
   // ── Render results ──
-  function renderResults(passes, threshold, days) {
+  function renderResults(passes, threshold, days, timezone) {
     if (passes.length === 0) {
       resultsContent.innerHTML = `
         <div class="no-results">
@@ -115,11 +115,13 @@
           weekday: 'short',
           month: 'short',
           day: 'numeric',
+          timeZone: timezone,
         });
         const timeStr = d.toLocaleTimeString(undefined, {
           hour: '2-digit',
           minute: '2-digit',
           timeZoneName: 'short',
+          timeZone: timezone,
         });
         const cloudClass =
           p.cloudCover <= 10
